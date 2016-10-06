@@ -22,23 +22,23 @@ class FireProblem(object):
         The monthly wage of the workers (input)
     beta : scalar(float), optional(default=0.95)
         The discount parameter
-    y_0 : scalar(float), optional(default=-1)
+    y_0 : scalar(float), optional(default=-0.1)
         The difference between prior expected match quality and wages
-    sig2_0 : scalar(float), optional(default=1)
+    sig2_0 : scalar(float), optional(default=0.1)
         The prior on match quality variance
-    sig2_star : scalar(float), optional(default=2)
+    sig2_star : scalar(float), optional(default=0.2)
         The noise of the match quality signal
     T_star : scalar(int), optional(default=365)
-        The number of periods in the grid
+        The number of periods in the tenure grid
     T_k : scalar(int), optional(default=30)
         The end of the probationary period
     b : scalar(float), optional(default=0.358)
         The workers' mandated benefits
     f : scalar(float), optional(default=1/300)
         The firing fines imposed on firms
-    sp : scalar(float), optional(default=3)
+    sp : scalar(float), optional(default=2)
         The multiples of std. dev. on the grid of firm beliefs
-    st : scalar(float), optional(default=0.1)
+    st : scalar(float), optional(default=0.01)
         The step on the grid of firm beliefs
 
 
@@ -52,12 +52,12 @@ class FireProblem(object):
     t : np.ndarray
         The grid of worker tenure
     H_0 : scipy.stats._distn_infrastructure.rv_frozen
-        The true CDF of match quality, ndim = n
+        The prior/objective distribution of match quality, ndim = n
     h_0 : function
-        The true PDF of match quality, ndim = n
+        The prior/objective density of match quality, ndim = n
         Input=vector; Output=vector
     y_star : np.ndarray
-        True match quality, ndim = n
+        Realized match quality, ndim = n
     xi : np.ndarray
         Match quality signals, ndim = n x T_star
     c : np.ndarray
@@ -72,9 +72,9 @@ class FireProblem(object):
 
     """
 
-    def __init__(self, w, beta=0.95, y_0=-1, sig2_0=1, 
-                 sig2_star=2, T_star=365, T_k=30,
-                 b=0.358, f=1/300, sp=3, st=0.1):
+    def __init__(self, w, beta=0.95, y_0=-0.1, sig2_0=0.1, 
+                 sig2_star=0.2, T_star=365, T_k=30,
+                 b=0.358, f=1/300, sp=2, st=0.01):
         "Initializing match relations with probationary contracts"
         
         self.w = w.reshape((-1, 1)) # Reshape as column vector
@@ -83,30 +83,26 @@ class FireProblem(object):
         self.b, self.f, self.sp, self.st = b, f, sp, st
 
         self.n = w.size 
-        #self.y = np.arange((y_0+w[0]/10)-np.ceil((max(sig2_0,sig2_star))**(0.5))*sp, 
-        #                   (y_0+w[0]/10)+np.ceil((max(sig2_0,sig2_star))**(0.5))*sp, st) # Belief grid
-        self.y = np.arange((y_0+w[0]/10)-(sig2_0)**(0.5)*sp, 
-                           (y_0+w[0]/10)+(sig2_0)**(0.5)*sp, st) # Belief grid
-        #self.y = np.arange(y_0-np.ceil((max(sig2_0,sig2_star))**(0.5))*sp, 
-        #                   y_0+np.ceil((max(sig2_0,sig2_star))**(0.5))*sp, st) # Belief grid
+        self.y = np.arange((y_0+w[0]/10)-(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, 
+                           (y_0+w[0]/10)+(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, st) # Belief grid
+        #belief grid would have to be different for each worker if we allowed for wage heterogeneity
         self.t = np.arange(0, T_star+1, 1) # Tenure grid
 
         self.H_0 = np.array([norm_distribution(y_0+(i/10), sig2_0) for i in w])
         self.h_0 = np.array([i.pdf for i in self.H_0])
         self.y_star = np.array([i.rvs(1) for i in self.H_0])
-        self.xi = np.array([norm_distribution.rvs(i, sig2_star, T_star+1) for i in self.y_star])
 
+        self.xi = np.array([norm_distribution.rvs(i, sig2_star, T_star+1) for i in self.y_star])
         self.c = np.hstack((np.array([0.5*(T_k-self.t[self.t<=T_k])*(i/10) for i in w]), 
                             np.array([(1+b)*i+(i/10)*(self.t[self.t>T_k]+10)*f for i in w])))
+
         self.mu = np.array([((sig2_0)/((self.t+1)*sig2_0+sig2_star))*i+
                             ((self.t*sig2_0+sig2_star)/((self.t+1)*sig2_0+sig2_star))*k 
                             for i, j in zip(self.y_star, w) for k in self.y]).reshape(self.n,self.y.size,T_star+1)
-        #self.mu = np.array([((sig2_0)/((self.t+1)*sig2_0+sig2_star))*i+
-        #                    ((self.t*sig2_0+sig2_star)/((self.t+1)*sig2_0+sig2_star))*(k+(j/10)) 
-        #                    for i, j in zip(self.y_star, w) for k in self.y]).reshape(self.n,self.y.size,T_star+1)
+        #y-grid already includes the addition of w/10, hence the use of k instead of (k+(j/10))
         self.sigma = np.tile(((sig2_0)/((self.t+1)*sig2_0+sig2_star))**(0.5)*sig2_star, (self.n,self.y.size,1))
-        #self.sigma = np.tile(((sig2_0)/((self.t+1)*sig2_0+sig2_star))**(2)*sig2_star, (self.n,self.y.size,1))
         self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu,self.sigma)])
+        #need to edit this for easier use in bellman_operator
 
 
     def __repr__(self):
@@ -154,29 +150,18 @@ class FireProblem(object):
             The updated value function Tv as an array of shape v.shape
 
             """
-        #new_v = np.empty(v.shape)
-        #for k in range(self.n):
-        # keep worker
-            #v0 = np.tile((self.xi[k,:]-np.tile(self.w[k],self.T_star+1)/10),(self.y.size,1)) + \
-                 #self.beta*np.multiply(v[k, :, :], np.array([self.h_t[k](i)[j[0],:] for i, j in zip(self.y,enumerate(self.y))]))
-                 #first line: period profits given worker k (all rows are equal since only time dimension matters)
-                 #second line: discounted expected profits for t+1 if worker is kept
-        # fire worker
-            #v1 = np.tile(((self.xi[k,:]-np.tile(self.w[k],self.T_star+1)/10) - self.c[k,:]),(self.y.size,1)) +  \
-                 #self.beta*np.multiply(v[k, :, :], np.transpose(np.tile(self.h_0[k](self.y),(self.t.size,1))))
-                 #first line: period profits given worker k (all rows are equal since only time dimension matters)
-                 #second line: discounted expected profits for t+1 if worker is fired
-            #new_v[k, :, :] = np.maximum(v0, v1)
-        #return new_v
 
         new_v = np.empty(v.shape)
         for k in range(self.n):
             for i in range(self.y.size):
                 for j in range(self.t.size):
                 #keep worker
-                    v0 = self.xi[k,j]-(self.w[k]/10) + self.beta*np.dot(v[k, :, j], norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y))
+                    E0 = norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y) / \
+                         sum(norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y)) #Sum to 1
+                    v0 = self.xi[k,j]-(self.w[k]/10) + self.beta*np.dot(v[k, :, j], E0)
                 #fire worker
-                    v1 = self.xi[k,j]-(self.w[k]/10)-self.c[k,j] + self.beta*np.dot(v[k, :, j], self.h_0[k](self.y))
+                    E1 = self.h_0[k](self.y)/sum(self.h_0[k](self.y)) #Sum to 1
+                    v1 = self.xi[k,j]-(self.w[k]/10)-self.c[k,j] + self.beta*np.dot(v[k, :, 0], E1)
                     
                     new_v[k, i, j] = np.maximum(v0, v1)
         return new_v
@@ -201,18 +186,22 @@ class FireProblem(object):
             [0, 1] where 0 = 'keep' and 1 = 'fire'
 
         """
+
         policy = np.empty(v.shape, dtype=int)
         for k in range(self.n):
-             
-            v0 = np.tile((self.xi[k,:]-np.tile(self.w[k],self.T_star+1)/10),(self.y.size,1)) + \
-                 self.beta*np.multiply(v[k, :, :], np.array([self.h_t[k](i)[j[0],:] for i, j in zip(self.y,enumerate(self.y))]))
-            v1 = np.tile(((self.xi[k,:]-np.tile(self.w[k],self.T_star+1)/10) - self.c[k,:]),(self.y.size,1)) +  \
-                 self.beta*np.multiply(v[k, :, :], np.transpose(np.tile(self.h_0[k](self.y),(self.t.size,1))))
+            for i in range(self.y.size):
+                for j in range(self.t.size):
+                #keep worker
+                    E0 = norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y) / \
+                         sum(norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y)) #Sum to 1
+                    v0 = self.xi[k,j]-(self.w[k]/10) + self.beta*np.dot(v[k, :, j], E0)
+                #fire worker
+                    E1 = self.h_0[k](self.y)/sum(self.h_0[k](self.y)) #Sum to 1
+                    v1 = self.xi[k,j]-(self.w[k]/10)-self.c[k,j] + self.beta*np.dot(v[k, :, 0], E1)
+                    
+                    action = (v1>v0).astype(int)
 
-            action = (v1>v0).astype(int)
-
-            policy[k, :, :] = action
-
+                    policy[k, i, j] = action
         return policy
 
     def firm_beliefs(self):
