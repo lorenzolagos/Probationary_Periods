@@ -11,6 +11,7 @@ from textwrap import dedent
 from scipy.stats import norm as norm_distribution
 from scipy import spatial
 import numpy as np
+from div0 import div0
 
 class FireProblem(object):
     
@@ -95,14 +96,18 @@ class FireProblem(object):
         self.xi = np.array([norm_distribution.rvs(i, sig2_star, T_star+1) for i in self.y_star])
         self.c = np.hstack((np.array([0.5*(T_k-self.t[self.t<=T_k])*(i/10) for i in w]), 
                             np.array([(1+b)*i+(i/10)*(self.t[self.t>T_k]+10)*f for i in w])))
+        self.costs = np.array([np.tile(self.c[k,:],(self.y.size,1)) for k in range(self.n)])
 
         self.mu = np.array([((sig2_0)/((self.t+1)*sig2_0+sig2_star))*i+
                             ((self.t*sig2_0+sig2_star)/((self.t+1)*sig2_0+sig2_star))*k 
                             for i, j in zip(self.y_star, w) for k in self.y]).reshape(self.n,self.y.size,T_star+1)
         #y-grid already includes the addition of w/10, hence the use of k instead of (k+(j/10))
         self.sigma = np.tile(((sig2_0)/((self.t+1)*sig2_0+sig2_star))**(0.5)*sig2_star, (self.n,self.y.size,1))
-        self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu,self.sigma)])
+        self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu.flatten(),self.sigma.flatten())]).reshape(self.n,self.y.size,T_star+1)
+        #self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu,self.sigma)])
         #need to edit this for easier use in bellman_operator
+        self.E0_p = np.array([div0(self.h_t[k,i,j](self.y),sum(self.h_t[k,i,j](self.y))) for k in range(self.n) for i in range(self.y.size) for j in range(T_star+1)])
+        self.E1_p = np.array([div0(self.h_0[k](self.y),sum(self.h_0[k](self.y))) for k in range(self.n)])
 
 
     def __repr__(self):
@@ -152,18 +157,19 @@ class FireProblem(object):
             """
 
         new_v = np.empty(v.shape)
-        for k in range(self.n):
-            for i in range(self.y.size):
-                for j in range(self.t.size):
-                #keep worker
-                    E0 = norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y) / \
-                         sum(norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y)) #Sum to 1
-                    v0 = self.xi[k,j]-(self.w[k]/10) + self.beta*np.dot(v[k, :, j], E0)
-                #fire worker
-                    E1 = self.h_0[k](self.y)/sum(self.h_0[k](self.y)) #Sum to 1
-                    v1 = self.xi[k,j]-(self.w[k]/10)-self.c[k,j] + self.beta*np.dot(v[k, :, 0], E1)
-                    
-                    new_v[k, i, j] = np.maximum(v0, v1)
+
+        v_cols = np.array([v[k,:,j] for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
+
+        #keep worker
+        E0 = np.array([np.dot(v_cols[l,:], self.E0_p[l,:]) for l in range(self.n*self.y.size*self.t.size)]).reshape(self.n,self.y.size,self.t.size)
+        v0 = self.beta*E0
+
+        #fire worker
+        E1 = np.array([np.dot(v_cols[0,:], self.E1_p[k,:]) for k in range(self.n)]).reshape(self.n,1,1)
+        v1 = -self.costs + self.beta*E1
+
+        new_v = np.maximum(v0, v1)
+
         return new_v
 
     def get_greedy(self, v):
@@ -188,20 +194,19 @@ class FireProblem(object):
         """
 
         policy = np.empty(v.shape, dtype=int)
-        for k in range(self.n):
-            for i in range(self.y.size):
-                for j in range(self.t.size):
-                #keep worker
-                    E0 = norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y) / \
-                         sum(norm_distribution(self.mu[k,i,j],self.sigma[k,i,j]).pdf(self.y)) #Sum to 1
-                    v0 = self.xi[k,j]-(self.w[k]/10) + self.beta*np.dot(v[k, :, j], E0)
-                #fire worker
-                    E1 = self.h_0[k](self.y)/sum(self.h_0[k](self.y)) #Sum to 1
-                    v1 = self.xi[k,j]-(self.w[k]/10)-self.c[k,j] + self.beta*np.dot(v[k, :, 0], E1)
-                    
-                    action = (v1>v0).astype(int)
 
-                    policy[k, i, j] = action
+        v_cols = np.array([v[k,:,j] for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
+
+        #keep worker
+        E0 = np.array([np.dot(v_cols[l,:], self.E0_p[l,:]) for l in range(self.n*self.y.size*self.t.size)]).reshape(self.n,self.y.size,self.t.size)
+        v0 = self.beta*E0
+
+        #fire worker
+        E1 = np.array([np.dot(v_cols[0,:], self.E1_p[k,:]) for k in range(self.n)]).reshape(self.n,1,1)
+        v1 = -self.costs + self.beta*E1
+
+        policy = (v1>v0).astype(int)
+
         return policy
 
     def firm_beliefs(self):
