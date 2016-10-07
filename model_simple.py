@@ -12,6 +12,8 @@ from scipy.stats import norm as norm_distribution
 from scipy import spatial
 import numpy as np
 from div0 import div0
+from scipy import interp
+import scipy.integrate as integrate
 
 class FireProblem(object):
     
@@ -63,13 +65,15 @@ class FireProblem(object):
         Match quality signals, ndim = n x T_star
     c : np.ndarray
         Firing costs, ndim = n x T_star
+    costs : np.ndarray
+        Firing costs, ndim = n x st x T_star
     mu : np.ndarray
         The mean for transition probabilities, ndim = n x st x T_star
     sigma : np.ndarray
         The variance for transition probabilities, ndim = n x st x T_star
     h_t : np.ndarray
-        The predicted PDF of match quality, ndim = n
-        Input=scalar; Output=matrix (st x T_star)
+        The predicted PDF of match quality, ndim = n*st*T_star
+        Input=vector; Output=vector
 
     """
 
@@ -84,16 +88,18 @@ class FireProblem(object):
         self.b, self.f, self.sp, self.st = b, f, sp, st
 
         self.n = w.size 
-        self.y = np.arange((y_0+w[0]/10)-(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, 
-                           (y_0+w[0]/10)+(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, st) # Belief grid
+        #self.y = np.arange((y_0+w[0]/10)-(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, 
+        #                   (y_0+w[0]/10)+(np.ceil(100*(max(sig2_0,sig2_star))**(0.5))/100)*sp, st) # Belief grid
+        self.y = np.arange((y_0+w[0]/10)-(np.ceil(100*(sig2_0)**(0.5))/100)*sp, 
+                           (y_0+w[0]/10)+(np.ceil(100*(sig2_0)**(0.5))/100)*sp, st) # Belief grid
         #belief grid would have to be different for each worker if we allowed for wage heterogeneity
         self.t = np.arange(0, T_star+1, 1) # Tenure grid
 
-        self.H_0 = np.array([norm_distribution(y_0+(i/10), sig2_0) for i in w])
+        self.H_0 = np.array([norm_distribution(y_0+(i/10), sig2_0**(0.5)) for i in w])
         self.h_0 = np.array([i.pdf for i in self.H_0])
         self.y_star = np.array([i.rvs(1) for i in self.H_0])
 
-        self.xi = np.array([norm_distribution.rvs(i, sig2_star, T_star+1) for i in self.y_star])
+        self.xi = np.array([norm_distribution.rvs(i, sig2_star**(0.5), T_star+1) for i in self.y_star])
         self.c = np.hstack((np.array([0.5*(T_k-self.t[self.t<=T_k])*(i/10) for i in w]), 
                             np.array([(1+b)*i+(i/10)*(self.t[self.t>T_k]+10)*f for i in w])))
         self.costs = np.array([np.tile(self.c[k,:],(self.y.size,1)) for k in range(self.n)])
@@ -103,11 +109,7 @@ class FireProblem(object):
                             for i, j in zip(self.y_star, w) for k in self.y]).reshape(self.n,self.y.size,T_star+1)
         #y-grid already includes the addition of w/10, hence the use of k instead of (k+(j/10))
         self.sigma = np.tile(((sig2_0)/((self.t+1)*sig2_0+sig2_star))**(0.5)*sig2_star, (self.n,self.y.size,1))
-        self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu.flatten(),self.sigma.flatten())]).reshape(self.n,self.y.size,T_star+1)
-        #self.h_t = np.array([norm_distribution(i,j).pdf for i, j in zip(self.mu,self.sigma)])
-        #need to edit this for easier use in bellman_operator
-        self.E0_p = np.array([div0(self.h_t[k,i,j](self.y),sum(self.h_t[k,i,j](self.y))) for k in range(self.n) for i in range(self.y.size) for j in range(T_star+1)])
-        self.E1_p = np.array([div0(self.h_0[k](self.y),sum(self.h_0[k](self.y))) for k in range(self.n)])
+        self.h_t = np.array([norm_distribution(i,j**(0.5)).pdf for i, j in zip(self.mu.flatten(),self.sigma.flatten())])
 
 
     def __repr__(self):
@@ -132,7 +134,7 @@ class FireProblem(object):
           - T_k (length of prob period)        : {tk}
           - b (worker benfits)                 : {ben}
           - f (firing fines)                   : {fin}
-          - n (number of simulations)          : {num}
+          - n (number of workers)              : {num}
         """
         hm, hs = self.H_0.args
         return dedent(m.format(b=self.beta, y0=self.y_0, s20=self.sig2_0,
@@ -158,14 +160,15 @@ class FireProblem(object):
 
         new_v = np.empty(v.shape)
 
-        v_cols = np.array([v[k,:,j] for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
+        v_cols = np.array([lambda x: interp(x, self.y, v[k,:,j]) for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
 
         #keep worker
-        E0 = np.array([np.dot(v_cols[l,:], self.E0_p[l,:]) for l in range(self.n*self.y.size*self.t.size)]).reshape(self.n,self.y.size,self.t.size)
+        E0 = np.array([integrate.fixed_quad(lambda x: v_cols[l](x)*self.h_t[l](x), i-self.st*j, i+self.st*j)[0] 
+                       for l, (i, j) in enumerate(zip(self.mu.flatten(),self.sigma.flatten()))]).reshape(self.n,self.y.size,self.t.size)
         v0 = self.beta*E0
 
         #fire worker
-        E1 = np.array([np.dot(v_cols[0,:], self.E1_p[k,:]) for k in range(self.n)]).reshape(self.n,1,1)
+        E1 = np.array([integrate.fixed_quad(lambda x: v_cols[0](x)*self.h_t[k](x), min(self.y), max(self.y))[0] for k in range(self.n)]).reshape(self.n,1,1)
         v1 = -self.costs + self.beta*E1
 
         new_v = np.maximum(v0, v1)
@@ -195,14 +198,15 @@ class FireProblem(object):
 
         policy = np.empty(v.shape, dtype=int)
 
-        v_cols = np.array([v[k,:,j] for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
+        v_cols = np.array([lambda x: interp(x, self.y, v[k,:,j]) for k in range(self.n) for i in range(self.y.size) for j in range(self.t.size)])
 
         #keep worker
-        E0 = np.array([np.dot(v_cols[l,:], self.E0_p[l,:]) for l in range(self.n*self.y.size*self.t.size)]).reshape(self.n,self.y.size,self.t.size)
+        E0 = np.array([integrate.fixed_quad(lambda x: v_cols[l](x)*self.h_t[l](x), i-self.st*j, i+self.st*j)[0] 
+                       for l, (i, j) in enumerate(zip(self.mu.flatten(),self.sigma.flatten()))]).reshape(self.n,self.y.size,self.t.size)
         v0 = self.beta*E0
 
         #fire worker
-        E1 = np.array([np.dot(v_cols[0,:], self.E1_p[k,:]) for k in range(self.n)]).reshape(self.n,1,1)
+        E1 = np.array([integrate.fixed_quad(lambda x: v_cols[0](x)*self.h_t[k](x), min(self.y), max(self.y))[0] for k in range(self.n)]).reshape(self.n,1,1)
         v1 = -self.costs + self.beta*E1
 
         policy = (v1>v0).astype(int)
